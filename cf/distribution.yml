@@ -1,0 +1,86 @@
+Description: Create S3 bucket and Cloudfront distribution for static webhosting
+
+Parameters:
+  RootDomainName:
+    Type: String
+  OriginBucketName:
+    Type: String
+  HostedZoneId:
+    Type: String
+  CertificateArn:
+    Type: String
+
+Resources:
+  OriginBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref OriginBucketName
+
+  OriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'OriginAccessIdentity for ${OriginBucket}'
+
+  BucketPolicy:
+    DependsOn: OriginAccessIdentity
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: OriginBucketPolicy
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt OriginAccessIdentity.S3CanonicalUserId
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${OriginBucket}/*'
+      Bucket: !Ref OriginBucket
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Sub 'www.${RootDomainName}'
+        Origins:
+          - Id: 'myS3Origin'
+            DomainName: !Sub '${RootDomainName}.s3.amazonaws.com'
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${OriginAccessIdentity}'
+        DefaultRootObject: 'index.html'
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: '/error.html'
+        DefaultCacheBehavior:
+          TargetOriginId: 'myS3Origin'
+          ForwardedValues:
+            QueryString: 'false'
+            Cookies:
+              Forward: 'none'
+          ViewerProtocolPolicy: 'redirect-to-https'
+        Enabled: 'true'
+        PriceClass: 'PriceClass_100'
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          SslSupportMethod: 'sni-only'
+
+  Route53RecordSet:
+    DependsOn: Distribution
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub '${RootDomainName}.'
+      Comment: Zone apex alias.
+      RecordSets:
+        - Name: !Sub 'www.${RootDomainName}'
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+            DNSName: !GetAtt Distribution.DomainName
+
+Outputs:
+  DistributionId:
+    Value: !Ref Distribution
+  OriginBucketName:
+    Value: !Ref OriginBucket

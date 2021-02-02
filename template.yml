@@ -1,0 +1,21 @@
+Description: Static webhosting
+
+Parameters:
+  RepositoryName:
+    Description: CodeCommit repository name
+    Type: String
+
+Resources:
+  DistributionStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: cf/distribution.yml
+
+  PipelineStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: cf/pipeline.yml
+      Parameters:
+        RepositoryName: !Ref RepositoryName
+        OriginBucketName: !GetAtt DistributionStack.OriginBucketName
+        DistributionId: !GetAtt DistributionStack.DistributionId

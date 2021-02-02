@@ -1,0 +1,198 @@
+Description: Create CodePipeline to update static webhosting
+
+Parameters:
+  BranchName:
+    Description: CodeCommit branch name
+    Type: String
+    Default: 'master'
+  RepositoryName:
+    Description: CodeCommit repository name
+    Type: String
+  OriginBucketName:
+    Description: S3 bucket name
+    Type: String
+  DistributionId:
+    Description: Cloudfront distribution id
+    Type: String
+
+Resources:
+  CodeBuildServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+      Path: /
+      RoleName: !Sub '${AWS::StackName}-CodeBuildServiceRole'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-CodeBuildPolicy'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                Effect: Allow
+                Resource:
+                  - 'arn:aws:s3:::$(BucketName)'
+                  - 'arn:aws:s3:::$(BucketName)/*'
+              - Effect: Allow
+                Action:
+                  - 'codecommit:GitPull'
+                Resource: '*'
+
+  CodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+      Path: /
+      RoleName: !Sub '${AWS::StackName}-CodePipelineServiceRole'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-CodePipelinePolicy'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'codecommit:CancelUploadArchive'
+                  - 'codecommit:GetBranch'
+                  - 'codecommit:GetCommit'
+                  - 'codecommit:GetUploadArchiveStatus'
+                  - 'codecommit:UploadArchive'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StartBuild'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:ListFunctions'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:*'
+                  - 's3:*'
+                Resource: '*'
+
+  CloudWatchEventRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'codepipeline:StartPipelineExecution'
+                Resource: '*'
+
+  GitUpdateEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - !Sub 'arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}'
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref BranchName
+      Targets:
+        - Arn: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${WebHostPipeline}'
+          RoleArn: !Ref CloudWatchEventRoleArn
+          Id: CodePipeline-WebHostPipeline
+
+  WebHostBuildProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Description: !Sub 'CodeBuild project for ${AWS::StackName}'
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        Type: LINUX_CONTAINER
+      Name: !Sub 'Build-${AWS::StackName}'
+      ServiceRole: !Ref CodeBuildServiceRole
+      Source:
+        Type: CODECOMMIT
+        Location: !Sub 'https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${RepositoryName}'
+        BuildSpec: !Sub
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+            build:
+              commands:
+                - aws s3 sync --delete ./src s3://${OriginBucketName}
+                - aws cloudfront create-invalidation --distribution-id ${DistributionId} --path "/*"
+
+  WebHostPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: !Sub 'Pipeline-${AWS::StackName}'
+      RoleArn: !Ref CodePipelineServiceRoleArn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: !Ref BranchName
+                RepositoryName: !Ref RepositoryName
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 2
